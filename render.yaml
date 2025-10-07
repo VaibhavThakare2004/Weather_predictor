@@ -1,0 +1,12 @@
+services:
+  # Backend API Service
+  - type: web
+    name: weather-predictor-api
+    env: docker
+    dockerfilePath: Dockerfile
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
+      # Add your API keys in Render dashboard, not here!
+    # Note: Frontend is intended to be deployed to Vercel or another static host.
