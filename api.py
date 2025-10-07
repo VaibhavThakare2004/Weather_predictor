@@ -10,10 +10,22 @@ import os
 from dotenv import load_dotenv
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
 import joblib
 from typing import List, Optional
+
+# TensorFlow is optional. Import lazily and allow the app to run without it.
+TF_AVAILABLE = False
+try:
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import LSTM, Dense, Dropout
+    TF_AVAILABLE = True
+except Exception as e:
+    # TensorFlow not installed or failed to import; LSTM functionality will be disabled.
+    Sequential = None
+    LSTM = None
+    Dense = None
+    Dropout = None
+    print(f"⚠️ TensorFlow import failed or not installed: {e}. LSTM functionality disabled.")
 
 app = FastAPI(title="Weather Risk Predictor API", version="1.0.0")
 
