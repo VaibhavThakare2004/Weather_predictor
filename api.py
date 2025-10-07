@@ -375,15 +375,27 @@ async def predict_weather(request: WeatherRequest):
             try:
                 url2 = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={API_KEY}&units=metric"
                 data2 = fetch_with_retry(url2)
-                # Map current weather to hourly-like structure
+                # Map current weather to forecast-like dict structure so downstream code can process it
                 if isinstance(data2, dict):
-                    now_dt = datetime.utcnow().strftime("%Y-%m-%d %H:00:00")
+                    now_ts = int(datetime.utcnow().timestamp())
+                    now_dt = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                     temp = data2.get('main', {}).get('temp')
                     humidity = data2.get('main', {}).get('humidity')
-                    clouds = data2.get('clouds', {}).get('all')
-                    wind = data2.get('wind', {}).get('speed')
-                    precip = data2.get('rain', {}).get('1h', 0) if data2.get('rain') else 0
-                    hourly_data = [[now_dt, temp, humidity, clouds, wind, precip]]
+                    clouds = data2.get('clouds', {}).get('all', 0)
+                    wind = data2.get('wind', {}).get('speed', 0)
+                    # OpenWeather may provide 'rain' with different keys
+                    precip = 0
+                    if isinstance(data2.get('rain'), dict):
+                        # prefer 1h then 3h
+                        precip = data2.get('rain', {}).get('1h', data2.get('rain', {}).get('3h', 0))
+                    hourly_data = [{
+                        "dt": now_ts,
+                        "dt_txt": now_dt,
+                        "main": {"temp": temp, "humidity": humidity},
+                        "clouds": {"all": clouds},
+                        "wind": {"speed": wind},
+                        "rain": {"3h": precip}
+                    }]
             except Exception as e2:
                 fetch_errors.append(str(e2))
                 print(f"❌ Fallback weather fetch also failed: {e2}")
@@ -393,22 +405,37 @@ async def predict_weather(request: WeatherRequest):
         
         # Process data (same as prediction.py)
         rows = []
-        for entry in hourly_data:
-            if "main" in entry:  # forecast format
-                temp = entry["main"]["temp"]
-                humidity = entry["main"]["humidity"]
-                clouds = entry["clouds"]["all"]
-                wind = entry["wind"]["speed"]
-                precip = entry.get("rain", {}).get("3h", 0)
-                dt_txt = entry["dt_txt"]
-            else:  # past format
-                temp = entry["temp"]
-                humidity = entry["humidity"]
-                clouds = entry["clouds"]
-                wind = entry["wind_speed"]
-                precip = entry.get("rain", 0)
-                dt_txt = datetime.utcfromtimestamp(entry["dt"]).strftime("%Y-%m-%d %H:%M:%S")
-            rows.append([dt_txt, temp, humidity, clouds, wind, precip])
+        try:
+            for entry in hourly_data:
+                if isinstance(entry, dict) and "main" in entry:  # forecast format
+                    temp = entry["main"]["temp"]
+                    humidity = entry["main"]["humidity"]
+                    clouds = entry["clouds"]["all"]
+                    wind = entry["wind"]["speed"]
+                    precip = entry.get("rain", {}).get("3h", 0)
+                    dt_txt = entry.get("dt_txt")
+                elif isinstance(entry, dict) and "temp" in entry:  # past or current format
+                    temp = entry.get("temp")
+                    humidity = entry.get("humidity")
+                    clouds = entry.get("clouds")
+                    # some formats use wind_speed
+                    wind = entry.get("wind_speed") or (entry.get("wind", {}) or {}).get("speed")
+                    precip = entry.get("rain", 0) if not isinstance(entry.get("rain"), dict) else list(entry.get("rain", {}).values())[0]
+                    dt_txt = entry.get("dt_txt") if entry.get("dt_txt") else datetime.utcfromtimestamp(entry.get("dt")).strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    # Unknown entry format - raise to capture diagnostics
+                    raise TypeError(f"Unexpected hourly entry format: {type(entry).__name__}")
+                rows.append([dt_txt, temp, humidity, clouds, wind, precip])
+        except Exception as e:
+            # Provide diagnostic info to help debug malformed responses
+            sample = None
+            try:
+                sample = str(hourly_data)[:1000]
+            except Exception:
+                sample = "<unprintable>"
+            detail = f"Prediction error during data processing: {e}; hourly_data_type={type(hourly_data).__name__}; sample={sample}"
+            print(detail)
+            raise HTTPException(status_code=500, detail=detail)
         
         df = pd.DataFrame(rows, columns=["datetime", "temp", "humidity", "cloud", "wind", "precip"])
         df["dt"] = pd.to_datetime(df["datetime"])
