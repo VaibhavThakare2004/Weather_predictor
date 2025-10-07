@@ -98,11 +98,16 @@ def fetch_with_retry(url, retries=3, delay=5):
         try:
             res = requests.get(url, timeout=15)
             res.raise_for_status()
-            return res.json()
+            # Try parsing JSON, but include raw text on parse error
+            try:
+                return res.json()
+            except Exception:
+                return {"raw_text": res.text}
         except Exception as e:
-            print(f"⚠ Attempt {attempt+1} failed: {e}. Retrying in {delay}s...")
+            print(f"⚠ Attempt {attempt+1} failed for URL {url}: {e}. Retrying in {delay}s...")
             time.sleep(delay)
-    raise Exception("❌ Error: Could not fetch data after retries")
+    # Give a helpful error including the url
+    raise Exception(f"❌ Error: Could not fetch data after retries for URL {url}")
 
 def evaluate_conditions(temp, precip, wind, humidity, cloud):
     conditions = []
@@ -348,17 +353,40 @@ async def predict_weather(request: WeatherRequest):
         today = datetime.utcnow().date()
         
         # Fetch weather data (same as prediction.py)
-        if today - timedelta(days=30) <= target_date <= today:
-            unix_time = int(datetime.combine(target_date, target_time).timestamp())
-            url = f"https://api.openweathermap.org/data/3.0/onecall/timemachine?lat={lat}&lon={lon}&dt={unix_time}&appid={API_KEY}&units=metric"
-            data = fetch_with_retry(url)
-            hourly_data = data.get("hourly", [])
-        elif today <= target_date <= today + timedelta(days=5):
-            url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={API_KEY}&units=metric"
-            data = fetch_with_retry(url)
-            hourly_data = data.get("list", [])
-        else:
-            raise HTTPException(status_code=400, detail="Date must be within past 30 days or next 5 days")
+        # Fetch weather data with graceful fallbacks and clearer errors
+        hourly_data = []
+        fetch_errors = []
+        try:
+            if today - timedelta(days=30) <= target_date <= today:
+                unix_time = int(datetime.combine(target_date, target_time).timestamp())
+                url = f"https://api.openweathermap.org/data/3.0/onecall/timemachine?lat={lat}&lon={lon}&dt={unix_time}&appid={API_KEY}&units=metric"
+                data = fetch_with_retry(url)
+                hourly_data = data.get("hourly", []) if isinstance(data, dict) else []
+            elif today <= target_date <= today + timedelta(days=5):
+                url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={API_KEY}&units=metric"
+                data = fetch_with_retry(url)
+                hourly_data = data.get("list", []) if isinstance(data, dict) else []
+            else:
+                raise HTTPException(status_code=400, detail="Date must be within past 30 days or next 5 days")
+        except Exception as e:
+            fetch_errors.append(str(e))
+            print(f"❌ Weather fetch failed: {e}")
+            # Attempt a fallback: try current weather endpoint for a best-effort response
+            try:
+                url2 = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={API_KEY}&units=metric"
+                data2 = fetch_with_retry(url2)
+                # Map current weather to hourly-like structure
+                if isinstance(data2, dict):
+                    now_dt = datetime.utcnow().strftime("%Y-%m-%d %H:00:00")
+                    temp = data2.get('main', {}).get('temp')
+                    humidity = data2.get('main', {}).get('humidity')
+                    clouds = data2.get('clouds', {}).get('all')
+                    wind = data2.get('wind', {}).get('speed')
+                    precip = data2.get('rain', {}).get('1h', 0) if data2.get('rain') else 0
+                    hourly_data = [[now_dt, temp, humidity, clouds, wind, precip]]
+            except Exception as e2:
+                fetch_errors.append(str(e2))
+                print(f"❌ Fallback weather fetch also failed: {e2}")
         
         if not hourly_data:
             raise HTTPException(status_code=404, detail="No weather data available")
