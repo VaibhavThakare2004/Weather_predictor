@@ -68,20 +68,188 @@ load_dotenv()
 API_KEY = os.getenv('OPENWEATHER_API_KEY')
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 
+# GitHub raw URLs for model files
+GITHUB_MODEL_URLS = {
+    "xgb_weather_model.pkl": "https://raw.githubusercontent.com/VaibhavThakare2004/Weather_predictor/master/xgb_weather_model.pkl",
+    "xgb_scaler.pkl": "https://raw.githubusercontent.com/VaibhavThakare2004/Weather_predictor/master/xgb_scaler.pkl",
+    "xgb_label_encoder.pkl": "https://raw.githubusercontent.com/VaibhavThakare2004/Weather_predictor/master/xgb_label_encoder.pkl"
+}
+
+def _model_candidate_paths(name: str):
+    """Return a list of candidate absolute paths where a model file might exist."""
+    candidates = []
+    model_dir = os.getenv("MODEL_DIR")
+    if model_dir:
+        candidates.append(os.path.join(model_dir, name))
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(script_dir, name))
+    candidates.append(os.path.join(os.getcwd(), name))
+    candidates.append(os.path.join(script_dir, "..", name))
+    # normalize
+    return [os.path.abspath(p) for p in candidates]
+
+def _download_from_github(filename: str, retries=3):
+    """Download model file from GitHub raw URL to local models directory"""
+    try:
+        # Create models directory if it doesn't exist
+        models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+        os.makedirs(models_dir, exist_ok=True)
+        
+        local_path = os.path.join(models_dir, filename)
+        github_url = GITHUB_MODEL_URLS.get(filename)
+        
+        if not github_url:
+            print(f"❌ No GitHub URL configured for {filename}")
+            return None
+        
+        # Skip if already exists and is recent (less than 1 day old)
+        if os.path.exists(local_path):
+            file_age = time.time() - os.path.getmtime(local_path)
+            if file_age < 86400:  # 1 day in seconds
+                print(f"✅ Using cached {filename} (age: {file_age/3600:.1f}h)")
+                return local_path
+        
+        print(f"⬇️ Downloading {filename} from GitHub...")
+        print(f"   URL: {github_url}")
+        
+        for attempt in range(retries):
+            try:
+                response = requests.get(github_url, timeout=30)
+                response.raise_for_status()
+                
+                with open(local_path, 'wb') as f:
+                    f.write(response.content)
+                
+                print(f"✅ Downloaded {filename} successfully (attempt {attempt + 1})")
+                return local_path
+                
+            except Exception as e:
+                print(f"⚠️ Download attempt {attempt + 1} failed for {filename}: {e}")
+                if attempt < retries - 1:
+                    time.sleep(2)
+                continue
+                
+        print(f"❌ All download attempts failed for {filename}")
+        return None
+        
+    except Exception as e:
+        print(f"❌ Failed to download {filename}: {e}")
+        return None
+
+def _load_xgb_models():
+    """Load XGBoost models from GitHub with fallback to local files"""
+    loaded_models = {}
+    
+    for filename in GITHUB_MODEL_URLS.keys():
+        try:
+            # Try to download from GitHub first
+            local_path = _download_from_github(filename)
+            
+            if local_path and os.path.exists(local_path):
+                loaded_models[filename] = joblib.load(local_path)
+                print(f"✅ Loaded {filename} successfully from GitHub")
+            else:
+                # Fallback: check if file exists locally
+                local_candidates = _model_candidate_paths(filename)
+                found = False
+                for candidate in local_candidates:
+                    if os.path.exists(candidate):
+                        loaded_models[filename] = joblib.load(candidate)
+                        print(f"✅ Loaded {filename} from local path: {candidate}")
+                        found = True
+                        break
+                
+                if not found:
+                    print(f"⚠️ {filename} not found locally or via GitHub")
+                    
+        except Exception as e:
+            print(f"❌ Error loading {filename}: {e}")
+    
+    return loaded_models
+
+# Global variables for loaded models
+xgb_model = None
+xgb_scaler = None
+xgb_label_encoder = None
 
 @app.on_event("startup")
-def check_env():
-    """Validate environment variables at startup (prevents import-time errors)."""
+async def startup_event():
+    """Load models on startup"""
+    global xgb_model, xgb_scaler, xgb_label_encoder
+    
+    print("🔄 Loading XGBoost models on startup...")
+    models = _load_xgb_models()
+    
+    xgb_model = models.get("xgb_weather_model.pkl")
+    xgb_scaler = models.get("xgb_scaler.pkl") 
+    xgb_label_encoder = models.get("xgb_label_encoder.pkl")
+    
+    if xgb_model and xgb_scaler:
+        print("✅ All XGBoost models loaded successfully!")
+    else:
+        missing = []
+        if not xgb_model: missing.append("model")
+        if not xgb_scaler: missing.append("scaler")
+        print(f"⚠️ Missing XGBoost components: {', '.join(missing)}")
+    
+    # Validate environment variables
     missing = []
     if not API_KEY:
         missing.append('OPENWEATHER_API_KEY')
     if not GOOGLE_API_KEY:
         missing.append('GOOGLE_API_KEY')
     if missing:
-        raise RuntimeError(
-            f"Missing required environment variables: {', '.join(missing)}. "
-            "Set them in your shell or create a .env file in the project root."
-        )
+        print(f"❌ Missing required environment variables: {', '.join(missing)}")
+
+@app.get("/model-status")
+async def model_status():
+    """Return JSON with model status including GitHub sources"""
+    info = {}
+    
+    for filename, github_url in GITHUB_MODEL_URLS.items():
+        candidates = _model_candidate_paths(filename)
+        found = None
+        for p in candidates:
+            if os.path.exists(p):
+                found = p
+                break
+                
+        # Check if downloaded to models directory
+        models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+        downloaded_path = os.path.join(models_dir, filename)
+        downloaded = os.path.exists(downloaded_path)
+                
+        info[filename] = {
+            "candidates": candidates, 
+            "found": found,
+            "downloaded": downloaded,
+            "downloaded_path": downloaded_path if downloaded else None,
+            "github_url": github_url,
+            "github_accessible": None
+        }
+        
+        # Test GitHub accessibility
+        try:
+            response = requests.head(github_url, timeout=10)
+            info[filename]["github_accessible"] = response.status_code == 200
+        except:
+            info[filename]["github_accessible"] = False
+
+    # xgboost availability
+    try:
+        import xgboost as xgb
+        info["xgboost"] = {"installed": True, "version": xgb.__version__}
+    except Exception as e:
+        info["xgboost"] = {"installed": False, "error": str(e)}
+
+    # Current loaded models status
+    info["loaded_models"] = {
+        "xgb_model": xgb_model is not None,
+        "xgb_scaler": xgb_scaler is not None,
+        "xgb_label_encoder": xgb_label_encoder is not None
+    }
+
+    return info
 
 # Pydantic models
 class LocationSuggestion(BaseModel):
@@ -109,7 +277,7 @@ class WeatherResponse(BaseModel):
     model_predictions: dict
 
 # ------------------------------
-# Utility Functions (Same as prediction.py)
+# Utility Functions
 # ------------------------------
 def fetch_with_retry(url, retries=3, delay=5):
     for attempt in range(retries):
@@ -544,77 +712,6 @@ async def predict_weather(request: WeatherRequest):
             reason = "Not available" if not TF_AVAILABLE else "Missing components" if any(x is None for x in [Sequential, LSTM, Dense, Dropout]) else f"Not enough sequence data (sequences: {len(X_seq) if len(X_seq) > 0 else 0}, unique labels: {len(np.unique(y_seq)) if len(X_seq) > 0 else 0})"
             print(f"⚠️ LSTM: {reason}")
         
-        # Load XGBoost (robust loader with path resolution)
-        xgb_model = None
-        xgb_scaler = None
-        rain_xgb = None
-
-        def _find_model_path(name: str):
-            """Search common locations for a model file and return the first match or None."""
-            candidates = []
-            # Allow override with MODEL_DIR env var
-            model_dir = os.getenv("MODEL_DIR")
-            if model_dir:
-                candidates.append(os.path.join(model_dir, name))
-            # Directory where this script lives
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            candidates.append(os.path.join(script_dir, name))
-            # Current working directory
-            candidates.append(os.path.join(os.getcwd(), name))
-            # Project root heuristic
-            candidates.append(os.path.join(script_dir, "..", name))
-
-            for p in candidates:
-                p = os.path.abspath(p)
-                logging.info(f"Trying model path: {p}")
-                if os.path.exists(p):
-                    return p
-            return None
-
-        try:
-            # Prefer native XGBoost model formats (json/bin) if present
-            native_path = _find_model_path("xgb_weather_model.json") or _find_model_path("xgb_weather_model.bin")
-            if native_path:
-                try:
-                    import xgboost as xgb
-                    logging.info(f"Loading native XGBoost Booster from {native_path}")
-                    booster = xgb.Booster()
-                    booster.load_model(native_path)
-                    xgb_model = booster
-                    scaler_p = _find_model_path("xgb_scaler.pkl")
-                    if scaler_p:
-                        xgb_scaler = joblib.load(scaler_p)
-                        logging.info(f"Loaded XGBoost scaler from {scaler_p}")
-                except Exception:
-                    logging.exception("Failed to load native XGBoost model")
-                    xgb_model = None
-                    xgb_scaler = None
-            else:
-                # Fallback: try pickled sklearn-wrapped XGB model and scaler
-                pkl_path = _find_model_path("xgb_weather_model.pkl")
-                scaler_p = _find_model_path("xgb_scaler.pkl")
-                if pkl_path:
-                    try:
-                        logging.info(f"Loading pickled XGBoost model from {pkl_path}")
-                        xgb_model = joblib.load(pkl_path)
-                    except Exception:
-                        logging.exception(f"Could not load pickled XGBoost model from {pkl_path}")
-                        xgb_model = None
-                if scaler_p:
-                    try:
-                        xgb_scaler = joblib.load(scaler_p)
-                        logging.info(f"Loaded XGBoost scaler from {scaler_p}")
-                    except Exception:
-                        logging.exception(f"Could not load XGBoost scaler from {scaler_p}")
-                        xgb_scaler = None
-            if xgb_model is not None:
-                print(f"✅ XGBoost models loaded successfully (from disk)")
-            else:
-                print(f"⚠️ XGBoost: Model not available, using fallback predictions")
-        except Exception as e:
-            logging.exception("Unexpected error while attempting to load XGBoost models")
-            print(f"⚠️ XGBoost loading failed: {e}")
-
         # Get prediction for target time (same as prediction.py)
         closest_row = df.iloc[(df["dt"] - datetime.combine(target_date, target_time)).abs().argsort()[:1]]
         temp = float(closest_row["temp"].values[0])
@@ -657,6 +754,8 @@ async def predict_weather(request: WeatherRequest):
             rain_lstm = min(92, max(8, weather_trend * 0.9 + instability * 1.5 + precip * 12))
             print(f"🧠 LSTM fallback prediction: {rain_lstm:.1f}%")
         
+        # XGBoost Prediction using pre-loaded models
+        rain_xgb = None
         if xgb_model and xgb_scaler:
             try:
                 # Create properly formatted DataFrame for XGBoost
@@ -665,6 +764,11 @@ async def predict_weather(request: WeatherRequest):
                 features_scaled = xgb_scaler.transform(xgb_features)
                 prediction = xgb_model.predict_proba(features_scaled)
                 rain_xgb = float(prediction[0][1]) * 100
+                
+                # If label encoder is available, use it for additional processing if needed
+                if xgb_label_encoder:
+                    print(f"✅ Using XGBoost with label encoder")
+                    
                 print(f"⚡ XGBoost prediction: {rain_xgb:.1f}% (conditions: temp={temp}, hum={humidity}, cloud={cloud})")
             except Exception as e:
                 print(f"❌ XGBoost prediction failed: {e}")
