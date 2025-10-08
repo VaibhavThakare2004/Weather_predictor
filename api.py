@@ -460,8 +460,12 @@ async def predict_weather(request: WeatherRequest):
         
         # Train models with improved labeling
         # More nuanced rain prediction based on multiple factors
-        df["label"] = df.apply(lambda r: 1 if (r["precip"] > 0.5 or (r["humidity"] > 80 and r["cloud"] > 70)) else 0, axis=1)
-        
+        # Replace your current label creation with:
+        df["label"] = df.apply(lambda r: 1 if (
+            r["precip"] > 0.1 or 
+    (r["humidity"] > 75 and r["cloud"] > 60) or
+    (r["humidity"] > 85)
+) else 0, axis=1)
         # Ensure feature names are consistent
         feature_cols = ["temp", "humidity", "cloud", "wind", "precip"]
         X = df[feature_cols].copy()
@@ -540,16 +544,28 @@ async def predict_weather(request: WeatherRequest):
             print(f"⚠️ LSTM: {reason}")
         
         # Load XGBoost
+        # Replace your current XGBoost loading section with:
         xgb_model = None
         xgb_scaler = None
         rain_xgb = None
-        try:
-            xgb_model = joblib.load("xgb_weather_model.pkl")
-            xgb_scaler = joblib.load("xgb_scaler.pkl")
-            print(f"✅ XGBoost models loaded successfully")
-        except Exception as e:
-            print(f"⚠️ XGBoost: Could not load pre-trained models - {e}")
-        
+
+# Try multiple possible file paths
+        model_paths = [
+            "xgb_weather_model.pkl",
+            "./xgb_weather_model.pkl",
+            "/opt/render/project/src/xgb_weather_model.pkl"  # Render specific path
+        ]
+        for model_path in model_paths:
+            try:
+                if os.path.exists(model_path):
+                    xgb_model = joblib.load(model_path)
+                    xgb_scaler = joblib.load(model_path.replace("model.pkl", "scaler.pkl"))
+                    print(f"✅ XGBoost models loaded successfully from {model_path}")
+                    break
+            except Exception as e:
+                print(f"⚠️ XGBoost: Failed to load from {model_path} - {e}")
+                continue
+
         # Get prediction for target time (same as prediction.py)
         closest_row = df.iloc[(df["dt"] - datetime.combine(target_date, target_time)).abs().argsort()[:1]]
         temp = float(closest_row["temp"].values[0])
@@ -621,7 +637,7 @@ async def predict_weather(request: WeatherRequest):
         # Add predictions with different weights based on reliability
         if rain_rf is not None:
             predictions.append(rain_rf)
-            weights.append(0.4 if rf_model else 0.2)  # Higher weight if actually trained
+            weights.append(0.3 if rf_model and rain_rf > 0 else 0.1)  # Higher weight if actually trained
             
         if rain_lstm is not None:
             predictions.append(rain_lstm)
