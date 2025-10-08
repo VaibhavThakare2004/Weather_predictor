@@ -14,6 +14,7 @@ from sklearn.preprocessing import MinMaxScaler
 import joblib
 from typing import List, Optional
 import builtins
+import logging
 
 # Override module-level print with a safe-print that strips non-ASCII on encode errors
 def _safe_print(*args, **kwargs):
@@ -543,29 +544,76 @@ async def predict_weather(request: WeatherRequest):
             reason = "Not available" if not TF_AVAILABLE else "Missing components" if any(x is None for x in [Sequential, LSTM, Dense, Dropout]) else f"Not enough sequence data (sequences: {len(X_seq) if len(X_seq) > 0 else 0}, unique labels: {len(np.unique(y_seq)) if len(X_seq) > 0 else 0})"
             print(f"⚠️ LSTM: {reason}")
         
-        # Load XGBoost
-        # Replace your current XGBoost loading section with:
+        # Load XGBoost (robust loader with path resolution)
         xgb_model = None
         xgb_scaler = None
         rain_xgb = None
 
-# Try multiple possible file paths
-        try:
-    # DEBUG: Check what files exist
-            import os
-            print("🔍 Checking for XGBoost files...")
-            all_files = os.listdir('.')
-            pkl_files = [f for f in all_files if '.pkl' in f]
-            print(f"📁 Found .pkl files: {pkl_files}")
-    
-    # Load models with exact same directory paths
-            xgb_model = joblib.load('xgb_weather_model.pkl')
-            xgb_scaler = joblib.load('xgb_scaler.pkl')
-            print("✅ XGBoost models loaded successfully from same directory")
+        def _find_model_path(name: str):
+            """Search common locations for a model file and return the first match or None."""
+            candidates = []
+            # Allow override with MODEL_DIR env var
+            model_dir = os.getenv("MODEL_DIR")
+            if model_dir:
+                candidates.append(os.path.join(model_dir, name))
+            # Directory where this script lives
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            candidates.append(os.path.join(script_dir, name))
+            # Current working directory
+            candidates.append(os.path.join(os.getcwd(), name))
+            # Project root heuristic
+            candidates.append(os.path.join(script_dir, "..", name))
 
+            for p in candidates:
+                p = os.path.abspath(p)
+                logging.info(f"Trying model path: {p}")
+                if os.path.exists(p):
+                    return p
+            return None
+
+        try:
+            # Prefer native XGBoost model formats (json/bin) if present
+            native_path = _find_model_path("xgb_weather_model.json") or _find_model_path("xgb_weather_model.bin")
+            if native_path:
+                try:
+                    import xgboost as xgb
+                    logging.info(f"Loading native XGBoost Booster from {native_path}")
+                    booster = xgb.Booster()
+                    booster.load_model(native_path)
+                    xgb_model = booster
+                    scaler_p = _find_model_path("xgb_scaler.pkl")
+                    if scaler_p:
+                        xgb_scaler = joblib.load(scaler_p)
+                        logging.info(f"Loaded XGBoost scaler from {scaler_p}")
+                except Exception:
+                    logging.exception("Failed to load native XGBoost model")
+                    xgb_model = None
+                    xgb_scaler = None
+            else:
+                # Fallback: try pickled sklearn-wrapped XGB model and scaler
+                pkl_path = _find_model_path("xgb_weather_model.pkl")
+                scaler_p = _find_model_path("xgb_scaler.pkl")
+                if pkl_path:
+                    try:
+                        logging.info(f"Loading pickled XGBoost model from {pkl_path}")
+                        xgb_model = joblib.load(pkl_path)
+                    except Exception:
+                        logging.exception(f"Could not load pickled XGBoost model from {pkl_path}")
+                        xgb_model = None
+                if scaler_p:
+                    try:
+                        xgb_scaler = joblib.load(scaler_p)
+                        logging.info(f"Loaded XGBoost scaler from {scaler_p}")
+                    except Exception:
+                        logging.exception(f"Could not load XGBoost scaler from {scaler_p}")
+                        xgb_scaler = None
+            if xgb_model is not None:
+                print(f"✅ XGBoost models loaded successfully (from disk)")
+            else:
+                print(f"⚠️ XGBoost: Model not available, using fallback predictions")
         except Exception as e:
-            print(f"❌ XGBoost loading failed: {e}")
-            print("💡 Make sure xgb_weather_model.pkl and xgb_scaler.pkl are in the same directory as api.py")  
+            logging.exception("Unexpected error while attempting to load XGBoost models")
+            print(f"⚠️ XGBoost loading failed: {e}")
 
         # Get prediction for target time (same as prediction.py)
         closest_row = df.iloc[(df["dt"] - datetime.combine(target_date, target_time)).abs().argsort()[:1]]
