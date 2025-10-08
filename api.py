@@ -7,11 +7,26 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import os
+import traceback
 from dotenv import load_dotenv
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import MinMaxScaler
 import joblib
 from typing import List, Optional
+import builtins
+
+# Override module-level print with a safe-print that strips non-ASCII on encode errors
+def _safe_print(*args, **kwargs):
+    s = ' '.join(str(a) for a in args)
+    try:
+        builtins.print(s, **kwargs)
+    except UnicodeEncodeError:
+        # Fall back to ASCII-only printing to avoid console encoding errors
+        safe = s.encode('ascii', errors='ignore').decode()
+        builtins.print(safe, **kwargs)
+
+# use safe print for all module prints
+print = _safe_print
 
 # TensorFlow is optional. Import lazily and allow the app to run without it.
 TF_AVAILABLE = False
@@ -19,13 +34,15 @@ try:
     from tensorflow.keras.models import Sequential
     from tensorflow.keras.layers import LSTM, Dense, Dropout
     TF_AVAILABLE = True
+    print("✅ TensorFlow imported successfully")
 except Exception as e:
     # TensorFlow not installed or failed to import; LSTM functionality will be disabled.
     Sequential = None
     LSTM = None
     Dense = None
     Dropout = None
-    print(f"⚠️ TensorFlow import failed or not installed: {e}. LSTM functionality disabled.")
+    # Use ASCII-only logging to avoid encoding issues on some consoles
+    print(f"[WARN] TensorFlow import failed or not installed: {e}. LSTM functionality disabled.")
 
 app = FastAPI(title="Weather Risk Predictor API", version="1.0.0")
 
@@ -144,57 +161,58 @@ def google_geocode(query: str):
     """Use Google Geocoding API for more accurate location search"""
     try:
         if GOOGLE_API_KEY == "YOUR_GOOGLE_API_KEY_HERE":
-            print(f"🔑 Google API key not configured, skipping Google geocoding")
+            print("[WARN] Google API key not configured, skipping Google geocoding")
             return None
-            
-        print(f"🔍 Google Geocoding API request for: '{query}'")
+
+        print(f"Google Geocoding API request for: '{query}'")
         base_url = "https://maps.googleapis.com/maps/api/geocode/json"
         params = {
             'address': query,
             'key': GOOGLE_API_KEY,
             'region': 'in'  # Bias towards India
         }
-        
+
         response = requests.get(base_url, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
-        print(f"📍 Google API status: {data.get('status', 'Unknown')}")
-        
+        print(f"Google API status: {data.get('status', 'Unknown')}")
+
         results = []
-        if data['status'] == 'OK':
-            print(f"✅ Found {len(data['results'])} Google results")
-            for result in data['results'][:5]:  # Limit to 5 results
-                location = result['geometry']['location']
-                formatted_address = result['formatted_address']
-                
+        if data.get('status') == 'OK':
+            results_raw = data.get('results', [])[:5]
+            print(f"Found {len(results_raw)} Google results")
+            for result in results_raw:
+                location = result.get('geometry', {}).get('location', {})
+                formatted_address = result.get('formatted_address', '')
+
                 # Extract components
                 components = result.get('address_components', [])
                 city = None
                 state = None
                 country = None
-                
+
                 for component in components:
-                    types = component['types']
+                    types = component.get('types', [])
                     if 'locality' in types or 'sublocality' in types:
-                        city = component['long_name']
+                        city = component.get('long_name')
                     elif 'administrative_area_level_1' in types:
-                        state = component['long_name']
+                        state = component.get('long_name')
                     elif 'country' in types:
-                        country = component['long_name']
-                
+                        country = component.get('long_name')
+
                 results.append({
                     'name': city or query.split(',')[0].strip(),
                     'state': state,
                     'country': country or 'India',
-                    'lat': location['lat'],
-                    'lon': location['lng'],
+                    'lat': location.get('lat'),
+                    'lon': location.get('lng'),
                     'display_name': formatted_address
                 })
-        
-        print(f"🌟 Google Geocoding returning {len(results)} results")
+
+        print(f"Google Geocoding returning {len(results)} results")
         return results
     except Exception as e:
-        print(f"❌ Google Geocoding failed: {e}")
+        print(f"[ERROR] Google Geocoding failed: {e}")
         return None
 
 # ------------------------------
@@ -463,7 +481,7 @@ async def predict_weather(request: WeatherRequest):
         else:
             print(f"⚠️ Random Forest: Not enough variety in data ({len(df['label'].unique())} unique labels)")
         
-        # LSTM
+        # LSTM Preparation
         scaler = MinMaxScaler()
         scaled_features = scaler.fit_transform(X)
         
@@ -484,20 +502,42 @@ async def predict_weather(request: WeatherRequest):
                 y_seq[mid_point:] = 1  # Second half rain chance
                 print(f"🔧 LSTM: Added synthetic label variation for better training")
         
+        # LSTM Model - FIXED SECTION
         lstm_model = None
         rain_lstm = None
-        if len(X_seq) > 0 and len(np.unique(y_seq)) >= 2:
-            print(f"🧠 Training LSTM with sequence length {sequence_length}, {len(X_seq)} sequences, {len(np.unique(y_seq))} unique labels")
-            lstm_model = Sequential([
-                LSTM(50, input_shape=(X_seq.shape[1], X_seq.shape[2])),
-                Dropout(0.2),
-                Dense(1, activation="sigmoid")
-            ])
-            lstm_model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
-            lstm_model.fit(X_seq, y_seq, epochs=10, batch_size=8, verbose=0)
-            print(f"✅ LSTM trained successfully")
+        
+        # Only attempt to train LSTM if TensorFlow is available AND all required components are imported
+        if (TF_AVAILABLE and 
+            Sequential is not None and 
+            LSTM is not None and 
+            Dense is not None and 
+            Dropout is not None and
+            len(X_seq) > 0 and 
+            len(np.unique(y_seq)) >= 2):
+            
+            try:
+                print(f"🧠 Training LSTM with sequence length {sequence_length}, {len(X_seq)} sequences, {len(np.unique(y_seq))} unique labels")
+                
+                # Create LSTM model
+                lstm_model = Sequential()
+                lstm_model.add(LSTM(50, input_shape=(X_seq.shape[1], X_seq.shape[2])))
+                lstm_model.add(Dropout(0.2))
+                lstm_model.add(Dense(1, activation="sigmoid"))
+                
+                # Compile the model
+                lstm_model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+                
+                # Train the model
+                lstm_model.fit(X_seq, y_seq, epochs=10, batch_size=8, verbose=0)
+                print(f"✅ LSTM trained successfully")
+                
+            except Exception as e:
+                print(f"❌ LSTM training failed: {e}")
+                lstm_model = None
+        
         else:
-            print(f"⚠️ LSTM: Not enough sequence data (sequences: {len(X_seq) if len(X_seq) > 0 else 0}, unique labels: {len(np.unique(y_seq)) if len(X_seq) > 0 else 0})")
+            reason = "Not available" if not TF_AVAILABLE else "Missing components" if any(x is None for x in [Sequential, LSTM, Dense, Dropout]) else f"Not enough sequence data (sequences: {len(X_seq) if len(X_seq) > 0 else 0}, unique labels: {len(np.unique(y_seq)) if len(X_seq) > 0 else 0})"
+            print(f"⚠️ LSTM: {reason}")
         
         # Load XGBoost
         xgb_model = None
@@ -531,12 +571,20 @@ async def predict_weather(request: WeatherRequest):
             rain_rf = min(95, max(5, (humidity - 30) * 1.2 + (precip * 15) + (cloud * 0.3)))
             print(f"🌲 Random Forest fallback prediction: {rain_rf:.1f}%")
         
+        # LSTM Prediction - FIXED SECTION
         if lstm_model is not None and len(X_seq) > 0:
-            latest_seq = scaled_features[-sequence_length:]
-            latest_seq = np.expand_dims(latest_seq, axis=0)
-            rain_lstm = float(lstm_model.predict(latest_seq, verbose=0)[0][0]) * 100
-            print(f"🧠 LSTM prediction: {rain_lstm:.1f}%")
+            try:
+                latest_seq = scaled_features[-sequence_length:]
+                latest_seq = np.expand_dims(latest_seq, axis=0)
+                rain_lstm = float(lstm_model.predict(latest_seq, verbose=0)[0][0]) * 100
+                print(f"🧠 LSTM prediction: {rain_lstm:.1f}%")
+            except Exception as e:
+                print(f"❌ LSTM prediction failed: {e}")
+                rain_lstm = None
         else:
+            rain_lstm = None
+        
+        if rain_lstm is None:
             print(f"❌ LSTM: Model not available, using fallback")
             # Advanced temporal fallback: considers weather progression
             weather_trend = (cloud + humidity) / 2  # Current conditions
@@ -599,6 +647,13 @@ async def predict_weather(request: WeatherRequest):
         core_condition = main_condition.split(" (")[0]
         suggestion = suggestions_dict.get(core_condition, "💡 No specific suggestions available.")
         
+        # Ensure values are standard Python floats for JSON/Pydantic serialization
+        def _as_float(val):
+            try:
+                return float(val) if val is not None else None
+            except Exception:
+                return None
+
         return WeatherResponse(
             location=location_name,
             coordinates={"lat": lat, "lon": lon},
@@ -613,14 +668,19 @@ async def predict_weather(request: WeatherRequest):
             suggestion=suggestion,
             rain_probability=round(final_prob, 1),
             model_predictions={
-                "random_forest": rain_rf,
-                "lstm": rain_lstm,
-                "xgboost": rain_xgb
+                "random_forest": _as_float(rain_rf),
+                "lstm": _as_float(rain_lstm),
+                "xgboost": _as_float(rain_xgb)
             }
         )
     
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
+        tb = traceback.format_exc()
+        # Log full traceback server-side for debugging
+        print(f"🔴 Prediction exception: {e}\n{tb}")
+        # Return a concise error to the client but include a truncated traceback for debugging
+        trace_snip = tb[:1000]
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}; trace_snip={trace_snip}")
 
 if __name__ == "__main__":
     import uvicorn
