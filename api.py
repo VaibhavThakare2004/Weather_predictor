@@ -68,13 +68,6 @@ load_dotenv()
 API_KEY = os.getenv('OPENWEATHER_API_KEY')
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 
-# GitHub raw URLs for model files
-GITHUB_MODEL_URLS = {
-    "xgb_weather_model.pkl": "https://raw.githubusercontent.com/VaibhavThakare2004/Weather_predictor/master/xgb_weather_model.pkl",
-    "xgb_scaler.pkl": "https://raw.githubusercontent.com/VaibhavThakare2004/Weather_predictor/master/xgb_scaler.pkl",
-    "xgb_label_encoder.pkl": "https://raw.githubusercontent.com/VaibhavThakare2004/Weather_predictor/master/xgb_label_encoder.pkl"
-}
-
 def _model_candidate_paths(name: str):
     """Return a list of candidate absolute paths where a model file might exist."""
     candidates = []
@@ -88,152 +81,19 @@ def _model_candidate_paths(name: str):
     # normalize
     return [os.path.abspath(p) for p in candidates]
 
-def _download_from_github(filename: str, retries=3):
-    """Download model file from GitHub raw URL to local models directory"""
-    try:
-        # Create models directory if it doesn't exist
-        models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
-        os.makedirs(models_dir, exist_ok=True)
-        
-        local_path = os.path.join(models_dir, filename)
-        github_url = GITHUB_MODEL_URLS.get(filename)
-        
-        if not github_url:
-            print(f"❌ No GitHub URL configured for {filename}")
-            return None
-        
-        # Skip if already exists and is recent (less than 1 day old)
-        if os.path.exists(local_path):
-            file_age = time.time() - os.path.getmtime(local_path)
-            if file_age < 86400:  # 1 day in seconds
-                print(f"✅ Using cached {filename} (age: {file_age/3600:.1f}h)")
-                return local_path
-        
-        print(f"⬇️ Downloading {filename} from GitHub...")
-        print(f"   URL: {github_url}")
-        
-        for attempt in range(retries):
-            try:
-                response = requests.get(github_url, timeout=30)
-                response.raise_for_status()
-                
-                with open(local_path, 'wb') as f:
-                    f.write(response.content)
-                
-                print(f"✅ Downloaded {filename} successfully (attempt {attempt + 1})")
-                return local_path
-                
-            except Exception as e:
-                print(f"⚠️ Download attempt {attempt + 1} failed for {filename}: {e}")
-                if attempt < retries - 1:
-                    time.sleep(2)
-                continue
-                
-        print(f"❌ All download attempts failed for {filename}")
-        return None
-        
-    except Exception as e:
-        print(f"❌ Failed to download {filename}: {e}")
-        return None
-
-def _load_xgb_models():
-    """Load XGBoost models from GitHub with fallback to local files"""
-    loaded_models = {}
-    
-    for filename in GITHUB_MODEL_URLS.keys():
-        try:
-            # Try to download from GitHub first
-            local_path = _download_from_github(filename)
-            
-            if local_path and os.path.exists(local_path):
-                loaded_models[filename] = joblib.load(local_path)
-                print(f"✅ Loaded {filename} successfully from GitHub")
-            else:
-                # Fallback: check if file exists locally
-                local_candidates = _model_candidate_paths(filename)
-                found = False
-                for candidate in local_candidates:
-                    if os.path.exists(candidate):
-                        loaded_models[filename] = joblib.load(candidate)
-                        print(f"✅ Loaded {filename} from local path: {candidate}")
-                        found = True
-                        break
-                
-                if not found:
-                    print(f"⚠️ {filename} not found locally or via GitHub")
-                    
-        except Exception as e:
-            print(f"❌ Error loading {filename}: {e}")
-    
-    return loaded_models
-
-# Global variables for loaded models
-xgb_model = None
-xgb_scaler = None
-xgb_label_encoder = None
-
-@app.on_event("startup")
-async def startup_event():
-    """Load models on startup"""
-    global xgb_model, xgb_scaler, xgb_label_encoder
-    
-    print("🔄 Loading XGBoost models on startup...")
-    models = _load_xgb_models()
-    
-    xgb_model = models.get("xgb_weather_model.pkl")
-    xgb_scaler = models.get("xgb_scaler.pkl") 
-    xgb_label_encoder = models.get("xgb_label_encoder.pkl")
-    
-    if xgb_model and xgb_scaler:
-        print("✅ All XGBoost models loaded successfully!")
-    else:
-        missing = []
-        if not xgb_model: missing.append("model")
-        if not xgb_scaler: missing.append("scaler")
-        print(f"⚠️ Missing XGBoost components: {', '.join(missing)}")
-    
-    # Validate environment variables
-    missing = []
-    if not API_KEY:
-        missing.append('OPENWEATHER_API_KEY')
-    if not GOOGLE_API_KEY:
-        missing.append('GOOGLE_API_KEY')
-    if missing:
-        print(f"❌ Missing required environment variables: {', '.join(missing)}")
-
 @app.get("/model-status")
 async def model_status():
-    """Return JSON with model status including GitHub sources"""
+    """Return JSON with candidate paths, existence, and whether xgboost/scaler can be loaded."""
+    names = ["xgb_weather_model.json", "xgb_weather_model.bin", "xgb_weather_model.pkl", "xgb_scaler.pkl"]
     info = {}
-    
-    for filename, github_url in GITHUB_MODEL_URLS.items():
-        candidates = _model_candidate_paths(filename)
+    for name in names:
+        candidates = _model_candidate_paths(name)
         found = None
         for p in candidates:
             if os.path.exists(p):
                 found = p
                 break
-                
-        # Check if downloaded to models directory
-        models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
-        downloaded_path = os.path.join(models_dir, filename)
-        downloaded = os.path.exists(downloaded_path)
-                
-        info[filename] = {
-            "candidates": candidates, 
-            "found": found,
-            "downloaded": downloaded,
-            "downloaded_path": downloaded_path if downloaded else None,
-            "github_url": github_url,
-            "github_accessible": None
-        }
-        
-        # Test GitHub accessibility
-        try:
-            response = requests.head(github_url, timeout=10)
-            info[filename]["github_accessible"] = response.status_code == 200
-        except:
-            info[filename]["github_accessible"] = False
+        info[name] = {"candidates": candidates, "found": found}
 
     # xgboost availability
     try:
@@ -242,14 +102,42 @@ async def model_status():
     except Exception as e:
         info["xgboost"] = {"installed": False, "error": str(e)}
 
-    # Current loaded models status
-    info["loaded_models"] = {
-        "xgb_model": xgb_model is not None,
-        "xgb_scaler": xgb_scaler is not None,
-        "xgb_label_encoder": xgb_label_encoder is not None
-    }
+    # Try to load pickled model and scaler if present (catch exceptions)
+    pkl_found = info["xgb_weather_model.pkl"]["found"]
+    scaler_found = info["xgb_scaler.pkl"]["found"]
+    if pkl_found:
+        try:
+            m = joblib.load(pkl_found)
+            info["xgb_pkl_load"] = {"ok": True, "type": str(type(m))}
+        except Exception as e:
+            info["xgb_pkl_load"] = {"ok": False, "error": str(e)}
+    else:
+        info["xgb_pkl_load"] = {"ok": False, "reason": "not_found"}
+
+    if scaler_found:
+        try:
+            s = joblib.load(scaler_found)
+            info["scaler_load"] = {"ok": True, "type": str(type(s))}
+        except Exception as e:
+            info["scaler_load"] = {"ok": False, "error": str(e)}
+    else:
+        info["scaler_load"] = {"ok": False, "reason": "not_found"}
 
     return info
+
+@app.on_event("startup")
+def check_env():
+    """Validate environment variables at startup (prevents import-time errors)."""
+    missing = []
+    if not API_KEY:
+        missing.append('OPENWEATHER_API_KEY')
+    if not GOOGLE_API_KEY:
+        missing.append('GOOGLE_API_KEY')
+    if missing:
+        raise RuntimeError(
+            f"Missing required environment variables: {', '.join(missing)}. "
+            "Set them in your shell or create a .env file in the project root."
+        )
 
 # Pydantic models
 class LocationSuggestion(BaseModel):
@@ -539,7 +427,6 @@ async def predict_weather(request: WeatherRequest):
         target_time = datetime.strptime(request.time, "%H:%M").time()
         today = datetime.utcnow().date()
         
-        # Fetch weather data (same as prediction.py)
         # Fetch weather data with graceful fallbacks and clearer errors
         hourly_data = []
         fetch_errors = []
@@ -590,7 +477,7 @@ async def predict_weather(request: WeatherRequest):
         if not hourly_data:
             raise HTTPException(status_code=404, detail="No weather data available")
         
-        # Process data (same as prediction.py)
+        # Process data with robust error handling
         rows = []
         try:
             for entry in hourly_data:
@@ -610,9 +497,17 @@ async def predict_weather(request: WeatherRequest):
                     precip = entry.get("rain", 0) if not isinstance(entry.get("rain"), dict) else list(entry.get("rain", {}).values())[0]
                     dt_txt = entry.get("dt_txt") if entry.get("dt_txt") else datetime.utcfromtimestamp(entry.get("dt")).strftime("%Y-%m-%d %H:%M:%S")
                 else:
-                    # Unknown entry format - raise to capture diagnostics
-                    raise TypeError(f"Unexpected hourly entry format: {type(entry).__name__}")
-                rows.append([dt_txt, temp, humidity, clouds, wind, precip])
+                    continue
+                
+                # Ensure all values are valid numbers
+                rows.append([
+                    dt_txt or "",
+                    float(temp) if temp is not None else 20.0,
+                    float(humidity) if humidity is not None else 50.0,
+                    float(clouds) if clouds is not None else 0.0,
+                    float(wind) if wind is not None else 0.0,
+                    float(precip) if precip is not None else 0.0
+                ])
         except Exception as e:
             # Provide diagnostic info to help debug malformed responses
             sample = None
@@ -627,14 +522,32 @@ async def predict_weather(request: WeatherRequest):
         df = pd.DataFrame(rows, columns=["datetime", "temp", "humidity", "cloud", "wind", "precip"])
         df["dt"] = pd.to_datetime(df["datetime"])
         
-        # Train models with improved labeling
-        # More nuanced rain prediction based on multiple factors
-        # Replace your current label creation with:
-        df["label"] = df.apply(lambda r: 1 if (
-            r["precip"] > 0.1 or 
-    (r["humidity"] > 75 and r["cloud"] > 60) or
-    (r["humidity"] > 85)
-) else 0, axis=1)
+        # Improved label creation with better rain detection
+        def create_rain_label(row):
+            """Better rain label creation considering multiple factors"""
+            # Multiple conditions that indicate rain potential
+            conditions = [
+                row["precip"] > 0.5,  # Actual precipitation
+                row["humidity"] > 85,  # Very high humidity
+                (row["humidity"] > 75 and row["cloud"] > 80),  # High humidity + overcast
+                (row["humidity"] > 70 and row["cloud"] > 90 and row["wind"] > 5),  # Multiple factors
+            ]
+            return 1 if any(conditions) else 0
+
+        df["label"] = df.apply(create_rain_label, axis=1)
+        
+        # Ensure we have at least some positive cases for training
+        if df["label"].sum() == 0:
+            # If no rain cases, mark the most likely ones based on conditions
+            humidity_threshold = df["humidity"].quantile(0.7)  # Top 30% humidity
+            cloud_threshold = df["cloud"].quantile(0.7)  # Top 30% cloud cover
+            
+            rain_candidates = df[(df["humidity"] >= humidity_threshold) & (df["cloud"] >= cloud_threshold)]
+            if len(rain_candidates) > 0:
+                # Mark top 2 most likely candidates as rain
+                for idx in rain_candidates.head(2).index:
+                    df.at[idx, "label"] = 1
+
         # Ensure feature names are consistent
         feature_cols = ["temp", "humidity", "cloud", "wind", "precip"]
         X = df[feature_cols].copy()
@@ -643,76 +556,7 @@ async def predict_weather(request: WeatherRequest):
         
         print(f"📊 Data summary: {len(X)} samples, Rain cases: {sum(y)}, No-rain cases: {len(y)-sum(y)}")
         
-        # Random Forest
-        rf_model = None
-        rain_rf = None
-        if len(df["label"].unique()) >= 2:
-            print(f"🌲 Training Random Forest with {len(X)} samples, {len(df['label'].unique())} unique labels")
-            rf_model = RandomForestClassifier(n_estimators=50, random_state=42)
-            rf_model.fit(X, y)
-            print(f"✅ Random Forest trained successfully")
-        else:
-            print(f"⚠️ Random Forest: Not enough variety in data ({len(df['label'].unique())} unique labels)")
-        
-        # LSTM Preparation
-        scaler = MinMaxScaler()
-        scaled_features = scaler.fit_transform(X)
-        
-        sequence_length = min(3, len(scaled_features) - 1)  # Reduced for better training with limited data
-        X_seq, y_seq = [], []
-        
-        if len(scaled_features) > sequence_length:
-            for i in range(len(scaled_features) - sequence_length):
-                X_seq.append(scaled_features[i:i+sequence_length])
-                y_seq.append(y.values[i+sequence_length])
-            X_seq, y_seq = np.array(X_seq), np.array(y_seq)
-            
-            # Add some synthetic variation to improve training
-            if len(np.unique(y_seq)) < 2 and len(y_seq) > 5:
-                # Create some balanced synthetic labels for better training
-                mid_point = len(y_seq) // 2
-                y_seq[:mid_point] = 0  # First half no rain
-                y_seq[mid_point:] = 1  # Second half rain chance
-                print(f"🔧 LSTM: Added synthetic label variation for better training")
-        
-        # LSTM Model - FIXED SECTION
-        lstm_model = None
-        rain_lstm = None
-        
-        # Only attempt to train LSTM if TensorFlow is available AND all required components are imported
-        if (TF_AVAILABLE and 
-            Sequential is not None and 
-            LSTM is not None and 
-            Dense is not None and 
-            Dropout is not None and
-            len(X_seq) > 0 and 
-            len(np.unique(y_seq)) >= 2):
-            
-            try:
-                print(f"🧠 Training LSTM with sequence length {sequence_length}, {len(X_seq)} sequences, {len(np.unique(y_seq))} unique labels")
-                
-                # Create LSTM model
-                lstm_model = Sequential()
-                lstm_model.add(LSTM(50, input_shape=(X_seq.shape[1], X_seq.shape[2])))
-                lstm_model.add(Dropout(0.2))
-                lstm_model.add(Dense(1, activation="sigmoid"))
-                
-                # Compile the model
-                lstm_model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
-                
-                # Train the model
-                lstm_model.fit(X_seq, y_seq, epochs=10, batch_size=8, verbose=0)
-                print(f"✅ LSTM trained successfully")
-                
-            except Exception as e:
-                print(f"❌ LSTM training failed: {e}")
-                lstm_model = None
-        
-        else:
-            reason = "Not available" if not TF_AVAILABLE else "Missing components" if any(x is None for x in [Sequential, LSTM, Dense, Dropout]) else f"Not enough sequence data (sequences: {len(X_seq) if len(X_seq) > 0 else 0}, unique labels: {len(np.unique(y_seq)) if len(X_seq) > 0 else 0})"
-            print(f"⚠️ LSTM: {reason}")
-        
-        # Get prediction for target time (same as prediction.py)
+        # Get target weather data for prediction
         closest_row = df.iloc[(df["dt"] - datetime.combine(target_date, target_time)).abs().argsort()[:1]]
         temp = float(closest_row["temp"].values[0])
         humidity = float(closest_row["humidity"].values[0])
@@ -720,87 +564,152 @@ async def predict_weather(request: WeatherRequest):
         wind = float(closest_row["wind"].values[0])
         precip = float(closest_row["precip"].values[0])
         
-        # Make predictions with proper feature formatting
-        if rf_model:
-            # Create properly formatted input with feature names
-            input_data = pd.DataFrame([[temp, humidity, cloud, wind, precip]], 
-                                    columns=feature_cols)
-            rain_rf = rf_model.predict_proba(input_data)[0][1] * 100
-            print(f"🌲 Random Forest prediction: {rain_rf:.1f}%")
-        else:
-            print(f"❌ Random Forest: Model not available, using fallback")
-            # Improved fallback: multi-factor weather analysis
-            rain_rf = min(95, max(5, (humidity - 30) * 1.2 + (precip * 15) + (cloud * 0.3)))
-            print(f"🌲 Random Forest fallback prediction: {rain_rf:.1f}%")
+        target_features = pd.DataFrame([[temp, humidity, cloud, wind, precip]], 
+                                     columns=feature_cols)
         
-        # LSTM Prediction - FIXED SECTION
-        if lstm_model is not None and len(X_seq) > 0:
-            try:
-                latest_seq = scaled_features[-sequence_length:]
-                latest_seq = np.expand_dims(latest_seq, axis=0)
-                rain_lstm = float(lstm_model.predict(latest_seq, verbose=0)[0][0]) * 100
-                print(f"🧠 LSTM prediction: {rain_lstm:.1f}%")
-            except Exception as e:
-                print(f"❌ LSTM prediction failed: {e}")
-                rain_lstm = None
-        else:
-            rain_lstm = None
+        # ------------------------------
+        # Train All Three Models on Current Data
+        # ------------------------------
+        
+        # 1. Random Forest Training
+        rf_model = None
+        rain_rf = None
+        try:
+            print(f"🌲 Training Random Forest with {len(X)} samples")
+            rf_model = RandomForestClassifier(
+                n_estimators=50, 
+                random_state=42,
+                min_samples_split=3,  # More tolerant for small datasets
+                min_samples_leaf=2,
+                max_depth=8
+            )
+            rf_model.fit(X, y)
+            
+            if hasattr(rf_model, 'predict_proba'):
+                rain_rf = rf_model.predict_proba(target_features)[0][1] * 100
+            else:
+                rain_rf = rf_model.predict(target_features)[0] * 100
+                
+            print(f"✅ Random Forest prediction: {rain_rf:.1f}%")
+            
+        except Exception as e:
+            print(f"❌ Random Forest training failed: {e}")
+            # Fallback calculation
+            rain_rf = min(95, max(5, (humidity - 30) * 1.2 + (precip * 15) + (cloud * 0.3)))
+            print(f"🌲 Random Forest fallback: {rain_rf:.1f}%")
+        
+        # 2. LSTM Training
+        lstm_model = None
+        rain_lstm = None
+        try:
+            if TF_AVAILABLE and len(X) > 5:
+                # Prepare sequences for LSTM
+                scaler = MinMaxScaler()
+                scaled_features = scaler.fit_transform(X)
+                
+                sequence_length = min(3, len(scaled_features) - 1)
+                if sequence_length >= 2:
+                    X_seq, y_seq = [], []
+                    for i in range(len(scaled_features) - sequence_length):
+                        X_seq.append(scaled_features[i:i+sequence_length])
+                        y_seq.append(y.values[i+sequence_length])
+                    
+                    if len(X_seq) > 0:
+                        X_seq, y_seq = np.array(X_seq), np.array(y_seq)
+                        
+                        print(f"🧠 Training LSTM with {len(X_seq)} sequences")
+                        lstm_model = Sequential()
+                        lstm_model.add(LSTM(32, input_shape=(X_seq.shape[1], X_seq.shape[2])))
+                        lstm_model.add(Dense(1, activation="sigmoid"))
+                        lstm_model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+                        
+                        # Train with validation split
+                        lstm_model.fit(X_seq, y_seq, epochs=10, batch_size=4, verbose=0, validation_split=0.2)
+                        
+                        # Predict using latest sequence
+                        latest_seq = scaled_features[-sequence_length:]
+                        latest_seq = np.expand_dims(latest_seq, axis=0)
+                        rain_lstm = float(lstm_model.predict(latest_seq, verbose=0)[0][0]) * 100
+                        print(f"✅ LSTM prediction: {rain_lstm:.1f}%")
+            
+        except Exception as e:
+            print(f"❌ LSTM training failed: {e}")
         
         if rain_lstm is None:
-            print(f"❌ LSTM: Model not available, using fallback")
-            # Advanced temporal fallback: considers weather progression
-            weather_trend = (cloud + humidity) / 2  # Current conditions
-            instability = abs(temp - 25) + wind  # Weather instability
-            rain_lstm = min(92, max(8, weather_trend * 0.9 + instability * 1.5 + precip * 12))
-            print(f"🧠 LSTM fallback prediction: {rain_lstm:.1f}%")
+            # LSTM fallback - consider temporal patterns
+            if len(df) > 3:
+                # Use recent trend in humidity and clouds
+                recent_humidity = df["humidity"].tail(3).mean()
+                recent_clouds = df["cloud"].tail(3).mean()
+                rain_lstm = min(90, max(10, (recent_humidity * 0.8) + (recent_clouds * 0.6) + (precip * 20)))
+            else:
+                rain_lstm = min(90, max(10, (humidity * 0.8) + (cloud * 0.6) + (precip * 20)))
+            print(f"🧠 LSTM fallback: {rain_lstm:.1f}%")
         
-        # XGBoost Prediction using pre-loaded models
+        # 3. XGBoost Training
         rain_xgb = None
-        if xgb_model and xgb_scaler:
-            try:
-                # Create properly formatted DataFrame for XGBoost
-                xgb_features = pd.DataFrame([[temp, humidity, cloud, wind, precip, 1013]], 
-                                          columns=['temp', 'humidity', 'cloud', 'wind', 'precip', 'pressure'])
-                features_scaled = xgb_scaler.transform(xgb_features)
-                prediction = xgb_model.predict_proba(features_scaled)
-                rain_xgb = float(prediction[0][1]) * 100
-                
-                # If label encoder is available, use it for additional processing if needed
-                if xgb_label_encoder:
-                    print(f"✅ Using XGBoost with label encoder")
-                    
-                print(f"⚡ XGBoost prediction: {rain_xgb:.1f}% (conditions: temp={temp}, hum={humidity}, cloud={cloud})")
-            except Exception as e:
-                print(f"❌ XGBoost prediction failed: {e}")
-                # Advanced fallback: weather pattern analysis
-                rain_xgb = min(95, max(5, precip * 25 + (humidity * 0.8) + (cloud * 0.5) - (temp * 0.3)))
-                print(f"⚡ XGBoost fallback prediction: {rain_xgb:.1f}%")
-        else:
-            print(f"❌ XGBoost: Model not available")
-            # Advanced fallback: weather pattern analysis
+        try:
+            import xgboost as xgb
+            
+            print(f"⚡ Training XGBoost with {len(X)} samples")
+            
+            # XGBoost parameters for small datasets
+            params = {
+                'max_depth': 3,
+                'eta': 0.1,
+                'objective': 'binary:logistic',
+                'eval_metric': 'logloss',
+                'subsample': 0.8,
+                'colsample_bytree': 0.8
+            }
+            
+            dtrain = xgb.DMatrix(X, label=y)
+            
+            # Train with early stopping
+            xgb_model = xgb.train(
+                params, 
+                dtrain,
+                num_boost_round=50,
+                evals=[(dtrain, 'train')],
+                verbose_eval=False
+            )
+            
+            # Make prediction
+            dtarget = xgb.DMatrix(target_features)
+            prediction = xgb_model.predict(dtarget)
+            rain_xgb = float(prediction[0]) * 100
+            
+            print(f"✅ XGBoost prediction: {rain_xgb:.1f}%")
+            
+        except Exception as e:
+            print(f"❌ XGBoost training failed: {e}")
+            # XGBoost fallback
             rain_xgb = min(95, max(5, precip * 25 + (humidity * 0.8) + (cloud * 0.5) - (temp * 0.3)))
-            print(f"⚡ XGBoost fallback prediction: {rain_xgb:.1f}%")
+            print(f"⚡ XGBoost fallback: {rain_xgb:.1f}%")
         
-        # Improved ensemble calculation with smart weighting
+        # ------------------------------
+        # Ensemble Prediction
+        # ------------------------------
+        
         predictions = []
         weights = []
         
-        print(f"🎯 Individual model results: RF={rain_rf}, LSTM={rain_lstm}, XGB={rain_xgb}")
+        print(f"🎯 Individual model results: RF={rain_rf:.1f}%, LSTM={rain_lstm:.1f}%, XGB={rain_xgb:.1f}%")
         
-        # Add predictions with different weights based on reliability
+        # Add predictions with weights
         if rain_rf is not None:
             predictions.append(rain_rf)
-            weights.append(0.3 if rf_model and rain_rf > 0 else 0.1)  # Higher weight if actually trained
+            weights.append(0.3)  # Good generalizer
             
         if rain_lstm is not None:
             predictions.append(rain_lstm)
-            weights.append(0.3 if lstm_model else 0.3)  # Consistent weight for temporal analysis
+            weights.append(0.4)  # Higher weight for temporal patterns
             
         if rain_xgb is not None:
             predictions.append(rain_xgb)
-            weights.append(0.5 if (xgb_model and xgb_scaler) else 0.3)  # Highest weight for pre-trained model
+            weights.append(0.3)  # Good for complex patterns
         
-        # Normalize weights
+        # Normalize weights and calculate final probability
         total_weight = sum(weights)
         if total_weight > 0:
             weights = [w/total_weight for w in weights]
@@ -810,7 +719,7 @@ async def predict_weather(request: WeatherRequest):
             
         print(f"🏆 Final ensemble prediction: {final_prob:.1f}% (weights: {[f'{w:.2f}' for w in weights]})")
         
-        # Evaluate conditions (same as prediction.py)
+        # Evaluate conditions
         conditions = evaluate_conditions(temp, precip, wind, humidity, cloud)
         main_condition = conditions[0]
         core_condition = main_condition.split(" (")[0]
