@@ -8,5 +8,8 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.10.0
+      - key: MODEL_DIR
+        # In Render Docker env the app is typically copied into /app; adjust if different
+        value: /app
       # Add your API keys in Render dashboard, not here!
     # Note: Frontend is intended to be deployed to Vercel or another static host.
