@@ -550,21 +550,22 @@ async def predict_weather(request: WeatherRequest):
         rain_xgb = None
 
 # Try multiple possible file paths
-        model_paths = [
-            "xgb_weather_model.pkl",
-            "./xgb_weather_model.pkl",
-            "/opt/render/project/src/xgb_weather_model.pkl"  # Render specific path
-        ]
-        for model_path in model_paths:
-            try:
-                if os.path.exists(model_path):
-                    xgb_model = joblib.load(model_path)
-                    xgb_scaler = joblib.load(model_path.replace("model.pkl", "scaler.pkl"))
-                    print(f"✅ XGBoost models loaded successfully from {model_path}")
-                    break
-            except Exception as e:
-                print(f"⚠️ XGBoost: Failed to load from {model_path} - {e}")
-                continue
+        try:
+    # DEBUG: Check what files exist
+            import os
+            print("🔍 Checking for XGBoost files...")
+            all_files = os.listdir('.')
+            pkl_files = [f for f in all_files if '.pkl' in f]
+            print(f"📁 Found .pkl files: {pkl_files}")
+    
+    # Load models with exact same directory paths
+            xgb_model = joblib.load('xgb_weather_model.pkl')
+            xgb_scaler = joblib.load('xgb_scaler.pkl')
+            print("✅ XGBoost models loaded successfully from same directory")
+
+        except Exception as e:
+            print(f"❌ XGBoost loading failed: {e}")
+            print("💡 Make sure xgb_weather_model.pkl and xgb_scaler.pkl are in the same directory as api.py")  
 
         # Get prediction for target time (same as prediction.py)
         closest_row = df.iloc[(df["dt"] - datetime.combine(target_date, target_time)).abs().argsort()[:1]]
